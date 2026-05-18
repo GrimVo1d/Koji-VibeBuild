@@ -15,6 +15,55 @@ from vibebuild.exceptions import CircularDependencyError, KojiConnectionError
 
 logger = logging.getLogger(__name__)
 
+try:
+    import rpm as _rpm  # type: ignore
+
+    HAS_RPM = True
+except ImportError:  # pragma: no cover - на macOS host rpm может отсутствовать
+    HAS_RPM = False
+
+
+def _compare_versions(a: tuple[str, str, str], b: tuple[str, str, str]) -> int:
+    """
+    Сравнить (epoch, version, release). Использует rpm.labelCompare если есть,
+    иначе делает «достаточно хорошее» сравнение через string-tuple.
+    """
+    if HAS_RPM:
+        return _rpm.labelCompare(a, b)
+    # Fallback: посимвольно по version, потом по release; epoch как число
+    ea = int(a[0] or "0")
+    eb = int(b[0] or "0")
+    if ea != eb:
+        return (ea > eb) - (ea < eb)
+    for x, y in ((a[1], b[1]), (a[2], b[2])):
+        if x == y:
+            continue
+        # Сравниваем токенами разделёнными на цифры/буквы
+        import re as _re
+
+        xa = _re.findall(r"\d+|[A-Za-z]+", x)
+        ya = _re.findall(r"\d+|[A-Za-z]+", y)
+        for xs, ys in zip(xa, ya):
+            if xs.isdigit() and ys.isdigit():
+                ix, iy = int(xs), int(ys)
+                if ix != iy:
+                    return (ix > iy) - (ix < iy)
+            elif xs != ys:
+                return (xs > ys) - (xs < ys)
+        if len(xa) != len(ya):
+            return (len(xa) > len(ya)) - (len(xa) < len(ya))
+    return 0
+
+
+_OP_FN = {
+    ">=": lambda c: c >= 0,
+    ">": lambda c: c > 0,
+    "=": lambda c: c == 0,
+    "==": lambda c: c == 0,
+    "<=": lambda c: c <= 0,
+    "<": lambda c: c < 0,
+}
+
 
 @dataclass
 class DependencyNode:
@@ -118,6 +167,27 @@ class KojiClient:
         result = self._run_koji_command("list-tagged", tag, package, "--quiet", "--inherit")
         return bool(result.stdout.strip())
 
+    def latest_build(self, package: str, tag: str) -> Optional[dict[str, str]]:
+        """
+        Вернуть NVR и разобранные version/release последнего билда пакета в теге.
+
+        Returns:
+            {"nvr": "...", "version": "...", "release": "..."} либо None если нет билда.
+        """
+        result = self._run_koji_command(
+            "list-tagged", tag, package, "--quiet", "--inherit", "--latest"
+        )
+        if result.returncode != 0:
+            return None
+        line = result.stdout.strip().split("\n")[0] if result.stdout.strip() else ""
+        if not line:
+            return None
+        nvr = line.split()[0]
+        # NVR разбираем с конца: <release> с возможным dist-suffix, <version>, остальное имя
+        parts = nvr.rsplit("-", 2)
+        if len(parts) < 3:
+            return None
+        return {"nvr": nvr, "version": parts[-2], "release": parts[-1]}
 
     def has_external_repos(self, tag: str) -> bool:
         """Check if a tag has external repos configured."""
@@ -182,6 +252,48 @@ class DependencyResolver:
                 self._has_external_repos = False
         return self._has_external_repos
 
+    def _version_ok(
+        self,
+        package: str,
+        required_op: Optional[str],
+        required_ver: Optional[str],
+    ) -> bool:
+        """
+        Проверить, что последний билд пакета удовлетворяет required_op required_ver.
+
+        Без ограничения (op/ver = None) — всегда True. Если последний билд
+        получить не удалось — оптимистично возвращаем True, чтобы не блокировать
+        сборку из-за временной недоступности Koji.
+        """
+        if not required_op or not required_ver:
+            return True
+        try:
+            latest = self.koji.latest_build(package, self.koji_tag)
+        except Exception as exc:
+            logger.debug("Не удалось получить latest_build для %s: %s", package, exc)
+            return True
+        if not latest:
+            return True
+        # required_ver может содержать релиз ("1.12-2"); если нет — release сравнивать не нужно
+        if "-" in required_ver:
+            ver_part, rel_part = required_ver.split("-", 1)
+            actual = ("0", latest["version"], latest["release"])
+            wanted = ("0", ver_part, rel_part)
+        else:
+            # Сравниваем только version, релиз приводим к одинаковому значению
+            ver_part = required_ver
+            actual = ("0", latest["version"], "0")
+            wanted = ("0", ver_part, "0")
+        cmp_fn = _OP_FN.get(required_op)
+        if cmp_fn is None:
+            return True
+        result = cmp_fn(_compare_versions(actual, wanted))
+        if not result:
+            logger.debug(
+                "version check fail: %s has %s but требуется %s %s",
+                package, latest["nvr"], required_op, required_ver,
+            )
+        return result
 
     def _is_our_package(self, package_name: str) -> bool:
         """Check if a package is registered in our local Koji.
@@ -224,6 +336,8 @@ class DependencyResolver:
 
         for dep in deps:
             name = dep.name if isinstance(dep, BuildRequirement) else dep
+            required_op = dep.operator if isinstance(dep, BuildRequirement) else None
+            required_ver = dep.version if isinstance(dep, BuildRequirement) else None
 
             # Normalize the name using resolver
             resolved_name = name
@@ -231,9 +345,23 @@ class DependencyResolver:
                 resolved_name = self.name_resolver.resolve(name)
 
             if resolved_name in self.available_packages:
+                if self._version_ok(resolved_name, required_op, required_ver):
+                    continue
+                logger.info(
+                    "  %s: версионное ограничение %s %s не удовлетворяется текущей сборкой",
+                    resolved_name, required_op, required_ver,
+                )
+                missing.append(resolved_name)
                 continue
 
             if self.koji.package_exists(resolved_name, self.koji_tag):
+                if self._version_ok(resolved_name, required_op, required_ver):
+                    continue
+                logger.info(
+                    "  %s: версионное ограничение %s %s не удовлетворяется",
+                    resolved_name, required_op, required_ver,
+                )
+                missing.append(resolved_name)
                 continue
 
             # Also try original name if different from resolved
