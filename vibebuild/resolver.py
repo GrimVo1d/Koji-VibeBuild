@@ -10,6 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
+from vibebuild._retry import with_retry
 from vibebuild.analyzer import BuildRequirement, PackageInfo, get_build_requires
 from vibebuild.exceptions import CircularDependencyError, KojiConnectionError
 
@@ -104,8 +105,15 @@ class KojiClient:
             return env
         return None
 
+    @with_retry(attempts=3, initial_delay=1.0, backoff=2.0)
     def _run_koji_command(self, *args) -> subprocess.CompletedProcess:
-        """Run koji command with configured options."""
+        """Run koji command with configured options.
+
+        Обёрнут в retry: при network/timeout-ошибках повторяет до 3 раз
+        с exponential backoff (1s → 2s → 4s). Программные ошибки (битые
+        аргументы, отсутствующий tag) не повторяются — KojiConnectionError
+        несёт текст, который не матчится с transient-маркерами.
+        """
         cmd = ["koji", f"--server={self.server}"]
 
         if self.cert:
@@ -449,10 +457,24 @@ class DependencyResolver:
                     missing = self.find_missing_deps(requires)
                     node.dependencies = missing
 
-                    for dep in missing:
-                        dep_srpm = None
-                        if srpm_resolver:
-                            dep_srpm = srpm_resolver(dep)
+                    # Параллельно скачиваем SRPM для всех новых missing-deps,
+                    # потом рекурсивно обходим их в детерминированном порядке.
+                    if srpm_resolver and missing:
+                        from concurrent.futures import ThreadPoolExecutor
+
+                        def _safe_resolve(d: str) -> Optional[str]:
+                            try:
+                                return srpm_resolver(d)
+                            except Exception as exc:
+                                logger.debug("srpm_resolver(%s) failed: %s", d, exc)
+                                return None
+
+                        with ThreadPoolExecutor(max_workers=5) as ex:
+                            dep_srpms = list(ex.map(_safe_resolve, missing))
+                    else:
+                        dep_srpms = [None] * len(missing)
+
+                    for dep, dep_srpm in zip(missing, dep_srpms):
                         resolve_deps(dep, dep_srpm)
 
                 except Exception:

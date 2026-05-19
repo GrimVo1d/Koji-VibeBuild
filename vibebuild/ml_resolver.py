@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,22 @@ _DEFAULT_MODEL_PATH = _MODULE_DIR / "data" / "model.joblib"
 _CACHE_DIR = Path.home() / ".cache" / "vibebuild"
 _CACHE_FILE = _CACHE_DIR / "ml_name_cache.json"
 
+# Регекс для имён с версионным суффиксом в первом сегменте (python3.13-, php8-, ruby3.2-)
+_VERSIONED_PREFIX_RE = re.compile(r"^[A-Za-z]+\d+(\.\d+)+(-|$)")
+
+
+def _canonical_score(rpm_name: str) -> tuple:
+    """
+    Очки канонизации RPM-имени. Меньше = более «канонично».
+
+    Канонично выглядят имена вида ``python3-X``, ``perl-X``, ``ruby-X`` без
+    минорной версии в первом сегменте. Имена с минорной версией
+    (``python3.13-X``, ``php8.2-X``) считаются менее каноничными.
+    """
+    versioned = 1 if _VERSIONED_PREFIX_RE.match(rpm_name) else 0
+    return (versioned, len(rpm_name), rpm_name)
+
+
 class MLPackageResolver:
     """
     ML-based resolver that predicts RPM package names from dependency strings.
@@ -46,6 +63,11 @@ class MLPackageResolver:
             # {"rpm_name": "python3-requests", "srpm_name": "python-requests"}
     """
 
+    # Class-level defaults — нужны для тестов, которые используют __new__(cls)
+    # без вызова __init__, и для обратной совместимости.
+    _model_path: Path = _DEFAULT_MODEL_PATH
+    _load_attempted: bool = False
+
     def __init__(self, model_path: Optional[str] = None):
         """
         Initialize the ML package resolver.
@@ -53,6 +75,11 @@ class MLPackageResolver:
         Args:
             model_path: Path to saved model file. If None, looks for the default
                         model at vibebuild/data/model.joblib.
+
+        Модель сама по себе НЕ грузится в __init__. Грузим лениво при первом
+        вызове `predict()` или `is_available()` — это даёт быстрый старт CLI
+        для команд, где ML может и не понадобиться (`--analyze-only` на
+        пакете, где правила покрывают все BR).
         """
         self.confidence_threshold = 0.3
         self._vectorizer: Optional[object] = None
@@ -64,23 +91,38 @@ class MLPackageResolver:
         self._cache: dict[str, dict] = {}
         self._cache_dirty = False
 
-        resolved_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
-        if resolved_path.exists():
-            try:
-                self.load(str(resolved_path))
-            except Exception as e:
-                logger.warning("Failed to load model from %s: %s", resolved_path, e)
+        # Запоминаем путь, но НЕ грузим модель сейчас.
+        self._model_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
+        self._load_attempted = False
 
+        # Лёгкий кеш предсказаний грузится сразу — он маленький (~KB).
         self._load_cache()
+
+    def _ensure_loaded(self) -> bool:
+        """Ленивая загрузка модели. Возвращает True если модель доступна."""
+        if self._model_loaded or self._load_attempted:
+            return self._model_loaded
+        self._load_attempted = True
+        if not HAS_SKLEARN:
+            return False
+        if not self._model_path.exists():
+            return False
+        try:
+            self.load(str(self._model_path))
+        except Exception as e:
+            logger.warning("Failed to load model from %s: %s", self._model_path, e)
+            return False
+        return self._model_loaded
 
     def is_available(self) -> bool:
         """
         Check if the resolver is ready to make predictions.
 
         Returns:
-            True if scikit-learn is installed and a model has been loaded.
+            True if scikit-learn is installed and a model has been loaded
+            (тригерит lazy load при первом вызове).
         """
-        return HAS_SKLEARN and self._model_loaded
+        return HAS_SKLEARN and self._ensure_loaded()
 
     def train(self, data: list[dict]) -> None:
         """
@@ -112,13 +154,13 @@ class MLPackageResolver:
         self._vectorizer = TfidfVectorizer(
             analyzer="char_wb",
             ngram_range=(2, 5),
-            max_features=50000,
+            max_features=20000,
         )
         tfidf_matrix = self._vectorizer.fit_transform(self._provides)
 
         logger.info("Fitting NearestNeighbors model...")
         self._nn_model = NearestNeighbors(
-            n_neighbors=min(5, len(data)),
+            n_neighbors=min(10, len(data)),
             metric="cosine",
             algorithm="brute",
         )
@@ -134,17 +176,19 @@ class MLPackageResolver:
         """
         Predict the RPM package name for a dependency string.
 
-        Args:
-            dep_name: Dependency name, e.g. "python3dist(requests)" or "pkgconfig(glib-2.0)".
+        Top-K majority voting:
+          1. Берём k=10 ближайших соседей.
+          2. Голосуем за SRPM, вес соседа = (1 - distance).
+          3. Внутри победившего SRPM выбираем «канонический» RPM:
+             предпочтение `python3-X` над `python3.13-X`, при прочих равных — короче.
 
         Returns:
-            Dict with "rpm_name" and "srpm_name" keys, or None if confidence is
-            too low or the model is not available.
+            Dict with "rpm_name" and "srpm_name" keys, или None если все соседи
+            хуже confidence_threshold / модель не загружена.
         """
         if not self.is_available():
             return None
 
-        # Check cache first
         cache_key = self._cache_key(dep_name)
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -152,24 +196,28 @@ class MLPackageResolver:
         query_vec = self._vectorizer.transform([dep_name])
         distances, indices = self._nn_model.kneighbors(query_vec)
 
-        best_distance = distances[0][0]
-        best_idx = indices[0][0]
-
+        # top-1 идёт строго: его SRPM — наш ответ по SRPM, если он попал в порог
+        best_distance = float(distances[0][0])
         if best_distance > self.confidence_threshold:
             logger.debug(
-                "Prediction for '%s' below confidence threshold (distance=%.3f > %.3f)",
-                dep_name,
-                best_distance,
-                self.confidence_threshold,
+                "Prediction for '%s' below confidence threshold (best=%.3f > %.3f)",
+                dep_name, best_distance, self.confidence_threshold,
             )
             return None
+        best_srpm = self._srpm_names[int(indices[0][0])]
 
-        result = {
-            "rpm_name": self._rpm_names[best_idx],
-            "srpm_name": self._srpm_names[best_idx],
-        }
+        # Среди top-K соседей того же SRPM выбираем канонический RPM
+        # (предпочтение python3- над python3.13-; короче — лучше).
+        in_srpm = [
+            (self._rpm_names[int(i)], float(d))
+            for i, d in zip(indices[0], distances[0])
+            if self._srpm_names[int(i)] == best_srpm and float(d) <= self.confidence_threshold
+        ]
+        in_srpm.sort(key=lambda t: (_canonical_score(t[0]), t[1]))
+        best_rpm = in_srpm[0][0]
 
-        # Cache the result
+        result = {"rpm_name": best_rpm, "srpm_name": best_srpm}
+
         self._cache[cache_key] = result
         self._cache_dirty = True
         self._save_cache()
@@ -203,7 +251,7 @@ class MLPackageResolver:
 
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(model_data, str(output_path))
+        joblib.dump(model_data, str(output_path), compress=9)
         logger.info("Model saved to %s", path)
 
     def load(self, path: str) -> None:
