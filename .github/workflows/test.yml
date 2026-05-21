@@ -1,0 +1,62 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  unit:
+    name: pytest py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install system deps (rpm)
+        run: sudo apt-get update && sudo apt-get install -y rpm cpio
+      - name: Install vibebuild
+        run: pip install -e ".[dev,ml]"
+      - name: Run pytest
+        run: pytest -q
+      - name: Lint
+        run: |
+          black --check .
+          isort --check .
+          flake8
+      - name: Mypy
+        run: mypy vibebuild
+
+  integration:
+    name: docker-compose smoke
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start koji-server
+        working-directory: dev/koji-server
+        run: |
+          cp .env.default .env
+          bash scripts/generate-certs.sh
+          docker compose up -d --build db koji-hub
+          timeout 180 bash -c 'until docker compose exec -T koji-hub curl -sk https://localhost/kojihub >/dev/null 2>&1; do sleep 2; done'
+          bash scripts/koji-init.sh
+          docker compose up -d --build koji-builder vibebuild-dev
+      - name: Smoke vibebuild --analyze-only inside container
+        working-directory: dev/koji-server
+        run: |
+          docker compose exec -T vibebuild-dev bash -c '
+            mkdir -p /tmp/vb && cd /tmp/vb
+            curl -sL -o hello.src.rpm \
+              https://kojipkgs.fedoraproject.org/packages/hello/2.12.2/1.fc42/src/hello-2.12.2-1.fc42.src.rpm
+            vibebuild --analyze-only hello.src.rpm
+          '
+      - name: Tear down
+        if: always()
+        working-directory: dev/koji-server
+        run: docker compose down -v

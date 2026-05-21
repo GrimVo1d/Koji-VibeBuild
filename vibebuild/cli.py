@@ -140,11 +140,13 @@ class _HelpAllArgumentParser(argparse.ArgumentParser):
             "Examples:\n"
             "  vibebuild python-requests\n"
             "  vibebuild fedora-target python-requests\n"
-            "  vibebuild --scratch fedora-target my-pkg.src.rpm\n\n"
+            "  vibebuild --scratch fedora-target my-pkg.src.rpm\n"
+            "  vibebuild train --release 42      # обучить ML-резолвер\n\n"
             "Modes:\n"
             "  --analyze-only     Only analyze dependencies, do not build\n"
             "  --download-only    Only download SRPM, do not build\n"
-            "  --dry-run          Show what would be built without actually building\n\n"
+            "  --dry-run          Show what would be built without actually building\n"
+            "  train              Subcommand: обучить ML-резолвер (vibebuild train --help)\n\n"
             "Common options:\n"
             "  -v, --verbose      Enable verbose output\n"
             "  -q, --quiet        Suppress non-error output\n"
@@ -576,15 +578,76 @@ def cmd_build(
         return 1
 
 
+def _train_subcommand(argv: list[str]) -> int:
+    """Подкоманда: vibebuild train [...]. Запускает полный ML-пайплайн."""
+    sub = argparse.ArgumentParser(
+        prog="vibebuild train",
+        description="Обучить ML-резолвер: собрать training data из Fedora repodata и натренировать модель",
+    )
+    sub.add_argument("--release", type=int, default=42, help="Fedora release (по умолчанию 42)")
+    sub.add_argument("--arch", default="x86_64", help="Архитектура (по умолчанию x86_64)")
+    sub.add_argument(
+        "--output",
+        default=str(Path(__file__).parent / "data" / "model.joblib"),
+        help="Куда сохранить модель",
+    )
+    sub.add_argument("--raw-path", default=None, help="Путь к raw-датасету (по умолчанию tmpfile)")
+    sub.add_argument("--keep-raw", action="store_true", help="Не удалять raw-датасет после обучения")
+    sub.add_argument("--test-split", type=float, default=0.05, help="Доля для теста")
+    sub.add_argument("--eval-sample", type=int, default=500, help="Сколько случайных тестовых примеров оценивать")
+    sub.add_argument("--seed", type=int, default=42, help="Random seed")
+    sub.add_argument("-v", "--verbose", action="store_true")
+    opts = sub.parse_args(argv)
+
+    setup_logging(opts.verbose, False)
+
+    try:
+        from vibebuild.training import collect_and_train
+    except ImportError as exc:
+        print(f"ОШИБКА: не удалось импортировать vibebuild.training: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        metrics = collect_and_train(
+            release=opts.release,
+            arch=opts.arch,
+            output=opts.output,
+            raw_path=opts.raw_path,
+            keep_raw=opts.keep_raw,
+            test_split=opts.test_split,
+            eval_sample=opts.eval_sample,
+            seed=opts.seed,
+        )
+    except Exception as exc:
+        print(f"ОШИБКА обучения: {exc}", file=sys.stderr)
+        return 1
+
+    print("=== Обучение завершено ===")
+    print(f"Train: {metrics.get('train_size')}, Test: {metrics.get('test_size')}")
+    if "predicted" in metrics:
+        print(f"Coverage: {metrics['coverage']*100:.1f}%")
+        print(f"RPM accuracy: {metrics['rpm_accuracy']*100:.1f}%")
+        print(f"SRPM accuracy: {metrics['srpm_accuracy']*100:.1f}%")
+    print(f"Модель: {opts.output}")
+    return 0
+
+
 def main(args: Optional[list[str]] = None) -> int:
     """Main entry point.
 
     Positional argument resolution:
       vibebuild SRPM          -- target is read from ~/.koji/config [koji]
       vibebuild TARGET SRPM   -- explicit target (backwards-compatible)
+      vibebuild train [...]   -- обучить ML-резолвер
     """
+    argv = list(args) if args is not None else sys.argv[1:]
+
+    # Early dispatch для подкоманды train, чтобы не ломать позиционный layout
+    if argv and argv[0] == "train":
+        return _train_subcommand(argv[1:])
+
     parser = create_parser()
-    opts = parser.parse_args(args)
+    opts = parser.parse_args(argv)
 
     if getattr(opts, "help_all", False):
         print(parser.format_help())
