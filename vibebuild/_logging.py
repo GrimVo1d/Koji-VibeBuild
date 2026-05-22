@@ -7,6 +7,7 @@ JSON-форматтер логов для production-парсинга (rsyslog/l
 Любой `logger.info("msg", extra={"package": "X"})` будет сериализован как JSON
 с timestamp/level/module/message/package полями.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,10 +17,28 @@ from datetime import datetime, timezone
 # Атрибуты LogRecord, которые мы НЕ копируем в JSON (всё, что есть в стандарте).
 _STANDARD_ATTRS = frozenset(
     {
-        "args", "asctime", "created", "exc_info", "exc_text", "filename",
-        "funcName", "levelname", "levelno", "lineno", "message", "module",
-        "msecs", "msg", "name", "pathname", "process", "processName",
-        "relativeCreated", "stack_info", "thread", "threadName",
+        "args",
+        "asctime",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "message",
+        "module",
+        "msecs",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "thread",
+        "threadName",
         "taskName",  # Python 3.12+
     }
 )
@@ -30,9 +49,7 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {
-            "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
-            ).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
             "module": record.module,
             "message": record.getMessage(),

@@ -9,6 +9,7 @@
 ВАЖНО: retry НЕ должен скрывать программные баги — мы повторяем только при
 указанных в `transient_marker`-функции исключениях/сигналах.
 """
+
 from __future__ import annotations
 
 import functools
@@ -83,8 +84,12 @@ def with_retry(
                         raise
                     logger.warning(
                         "%s попытка %d/%d упала (%s: %s); жду %.1fs",
-                        fn.__name__, attempt, attempts,
-                        type(exc).__name__, exc, delay,
+                        fn.__name__,
+                        attempt,
+                        attempts,
+                        type(exc).__name__,
+                        exc,
+                        delay,
                     )
                     time.sleep(delay)
                     delay *= backoff

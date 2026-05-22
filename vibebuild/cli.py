@@ -113,9 +113,7 @@ def setup_logging(
         handler.setFormatter(JsonFormatter())
     else:
         handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"
-            )
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
         )
 
     root = logging.getLogger()
@@ -276,12 +274,17 @@ Examples:
     )
 
     build_group.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Пересобрать пакет даже если идентичный NVR уже есть в target-теге",
     )
     build_group.add_argument(
-        "--no-idempotency", action="store_true",
-        help="Отключить idempotency-pre-check (по умолчанию vibebuild пропускает уже собранные пакеты)",
+        "--no-idempotency",
+        action="store_true",
+        help=(
+            "Отключить idempotency-pre-check "
+            "(по умолчанию vibebuild пропускает уже собранные пакеты)"
+        ),
     )
 
     build_group.add_argument("--download-dir", metavar="DIR", help="Directory for downloaded SRPMs")
@@ -303,7 +306,10 @@ Examples:
     build_group.add_argument(
         "--fedora-release",
         metavar="VER",
-        help="Fedora release to fetch SRPMs from (e.g. 42). Default: auto-detect from target, fallback to rawhide",
+        help=(
+            "Fedora release to fetch SRPMs from (e.g. 42). "
+            "Default: auto-detect from target, fallback to rawhide"
+        ),
     )
 
     mode_group = parser.add_argument_group("Mode options")
@@ -325,7 +331,10 @@ Examples:
     parser.add_argument(
         "srpm",
         nargs="?",
-        help="Path to .src.rpm file or package name (e.g. python3); if name, SRPM is downloaded then built",
+        help=(
+            "Path to .src.rpm file or package name (e.g. python3); "
+            "if name, SRPM is downloaded then built"
+        ),
     )
 
     return parser
@@ -582,7 +591,10 @@ def _train_subcommand(argv: list[str]) -> int:
     """Подкоманда: vibebuild train [...]. Запускает полный ML-пайплайн."""
     sub = argparse.ArgumentParser(
         prog="vibebuild train",
-        description="Обучить ML-резолвер: собрать training data из Fedora repodata и натренировать модель",
+        description=(
+            "Обучить ML-резолвер: собрать training data из Fedora repodata "
+            "и натренировать модель"
+        ),
     )
     sub.add_argument("--release", type=int, default=42, help="Fedora release (по умолчанию 42)")
     sub.add_argument("--arch", default="x86_64", help="Архитектура (по умолчанию x86_64)")
@@ -592,9 +604,13 @@ def _train_subcommand(argv: list[str]) -> int:
         help="Куда сохранить модель",
     )
     sub.add_argument("--raw-path", default=None, help="Путь к raw-датасету (по умолчанию tmpfile)")
-    sub.add_argument("--keep-raw", action="store_true", help="Не удалять raw-датасет после обучения")
+    sub.add_argument(
+        "--keep-raw", action="store_true", help="Не удалять raw-датасет после обучения"
+    )
     sub.add_argument("--test-split", type=float, default=0.05, help="Доля для теста")
-    sub.add_argument("--eval-sample", type=int, default=500, help="Сколько случайных тестовых примеров оценивать")
+    sub.add_argument(
+        "--eval-sample", type=int, default=500, help="Сколько случайных тестовых примеров оценивать"
+    )
     sub.add_argument("--seed", type=int, default=42, help="Random seed")
     sub.add_argument("-v", "--verbose", action="store_true")
     opts = sub.parse_args(argv)

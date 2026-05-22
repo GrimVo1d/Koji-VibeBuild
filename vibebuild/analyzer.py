@@ -350,17 +350,13 @@ def _extract_srpm(srpm_path: Path, dest_dir: str) -> None:
         except subprocess.TimeoutExpired as exc:
             p1.kill()
             p2.kill()
-            raise InvalidSRPMError(
-                f"Распаковка SRPM {srpm_path} превысила таймаут"
-            ) from exc
+            raise InvalidSRPMError(f"Распаковка SRPM {srpm_path} превысила таймаут") from exc
 
     if p1.returncode != 0:
         raise InvalidSRPMError(
-            f"rpm2cpio упал для {srpm_path}: "
-            f"{rpm2cpio_err.decode(errors='replace').strip()}"
+            f"rpm2cpio упал для {srpm_path}: " f"{rpm2cpio_err.decode(errors='replace').strip()}"
         )
     if p2.returncode != 0:
         raise InvalidSRPMError(
-            f"cpio упал при распаковке {srpm_path}: "
-            f"{cpio_err.decode(errors='replace').strip()}"
+            f"cpio упал при распаковке {srpm_path}: " f"{cpio_err.decode(errors='replace').strip()}"
         )

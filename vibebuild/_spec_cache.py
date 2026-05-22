@@ -4,6 +4,7 @@ Persistent кеш разбора SRPM. Ключ — sha256 от файла + р�
 При повторном вызове `get_package_info_from_srpm(path)` на том же SRPM
 парсинг (rpm2cpio + cpio + spec analysis) пропускается.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -12,7 +13,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from vibebuild.analyzer import PackageInfo

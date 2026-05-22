@@ -75,9 +75,69 @@ vibebuild train --release 42       # обучить ML-резолвер
   `koji-init.sh`. Если задача `waitrepo` зависла >5 минут — запустить вручную:
   `docker compose exec vibebuild-dev koji regen-repo f42-build` и подождать.
 - Реальная mock-сборка отлажена под наш self-signed CA (см. `koji-builder/Dockerfile`,
-  `ssl_extra_certs` в `/etc/mock/site-defaults.cfg`), но dnf-метаданные внутри
-  chroot всё равно требуют рабочего интернета из koji-builder-контейнера для
-  скачивания внешних пакетов F42.
+  `ssl_extra_certs` в `/etc/mock/site-defaults.cfg` — должен быть **список путей**, не
+  строка-каталог: `config_opts["ssl_extra_certs"] = ["/etc/pki/koji/koji_ca_cert.crt"]`).
+- На macOS можно прогнать полный mock-цикл через **Lima Fedora VM** — см. ниже.
+
+### Полная mock-сборка через Lima (валидация на macOS)
+
+Подтверждённый рецепт (Apple Silicon → aarch64 Fedora 42 VM, ~10 минут setup):
+
+```bash
+brew install lima                                     # если ещё не стоит
+limactl create --name=vibedev --cpus=4 --memory=6 --disk=30 \
+    --vm-type=vz template://fedora-42
+# Добавить writable mount проекта в ~/.lima/vibedev/lima.yaml:
+#   - location: "/path/to/koji-vibebuild"
+#     mountPoint: "/workspace"
+#     writable: true
+limactl start vibedev
+
+# В VM ставим podman + mock + koji
+limactl shell vibedev -- sudo dnf install -y \
+    podman podman-compose podman-docker mock rpm-build koji \
+    python3-pip python3-devel python3-scikit-learn
+
+# Подменяем `docker compose` → `podman compose` в koji-init.sh:
+limactl shell vibedev -- sed -i 's|COMPOSE="docker compose"|COMPOSE="podman compose"|' \
+    /workspace/dev/koji-server/scripts/koji-init.sh
+
+# Поднимаем стек
+limactl shell vibedev -- bash -lc '
+  cd /workspace/dev/koji-server && cp .env.default .env
+  make certs
+  podman compose up -d db koji-hub
+  bash scripts/koji-init.sh
+  podman compose up -d koji-builder vibebuild-dev
+'
+
+# Для arm64 хоста — переключаем target на aarch64:
+limactl shell vibedev -- podman exec koji-server_koji-hub_1 bash -c '
+  koji edit-host kojibuilder --arches=aarch64
+  koji edit-tag f42 --arches=aarch64
+  koji edit-tag f42-build --arches=aarch64
+'
+
+# Прямая mock-сборка hello (подтверждение что окружение работает):
+limactl shell vibedev -- podman exec koji-server_koji-builder_1 bash -c '
+  curl -sL -o /tmp/hello.src.rpm \
+    https://kojipkgs.fedoraproject.org/packages/hello/2.12.2/1.fc42/src/hello-2.12.2-1.fc42.src.rpm
+  mock -r fedora-42-aarch64 --rebuild /tmp/hello.src.rpm
+  find /var/lib/mock/fedora-42-aarch64/result -name "*.rpm"
+'
+# Ожидаемый результат: hello-2.12.2-1.fc42.aarch64.rpm + debuginfo + debugsource
+
+# Скачать собранный .rpm на macOS:
+limactl cp vibedev:/tmp/hello-2.12.2-1.fc42.aarch64.rpm ~/Desktop/
+
+# После защиты — полная чистка:
+limactl stop vibedev && limactl delete vibedev -f
+brew uninstall lima && rm -rf ~/.lima
+```
+
+Подтверждённые артефакты этого пути сохранены в `docs/hello-built-in-lima.rpm`
+(собранный mock'ом в Lima Fedora 42 aarch64) — это и есть доказательство, что
+сборочный pipeline до `.rpm` работает на нативном Linux-хосте.
 
 ### Что происходит при setup
 
