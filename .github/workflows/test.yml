@@ -47,6 +47,14 @@ jobs:
           timeout 180 bash -c 'until docker compose exec -T koji-hub curl -sk https://localhost/kojihub >/dev/null 2>&1; do sleep 2; done'
           bash scripts/koji-init.sh
           docker compose up -d --build koji-builder vibebuild-dev
+      - name: Wait for vibebuild install in container
+        working-directory: dev/koji-server
+        run: |
+          timeout 180 bash -c '
+            until docker compose exec -T vibebuild-dev command -v vibebuild >/dev/null 2>&1; do
+              sleep 3
+            done
+          '
       - name: Smoke vibebuild --analyze-only inside container
         working-directory: dev/koji-server
         run: |
