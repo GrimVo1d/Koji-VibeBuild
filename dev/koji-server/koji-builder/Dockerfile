@@ -19,6 +19,35 @@ RUN printf "%s\n" \
     "    config_opts['ssl_extra_certs'] = _ca" \
     >> /etc/mock/site-defaults.cfg
 
+# Совместимость kojid (передаёт `-r koji/<name>`) с mock 6.7+, который такую
+# форму больше не понимает и падает с IsADirectoryError на '/'.
+# /usr/bin/mock — это consolehelper-симлинк, ломать его нельзя
+# (kojibuilder из группы mock получает root-привилегии через PAM именно
+# через consolehelper). Поэтому патчим сам Python-скрипт mock'а в самом
+# начале, чтобы он переписывал `-r koji/<name>` в современный
+# `--configdir /etc/mock/koji -r <name>`.
+RUN python3 -c "import sys, pathlib; p = pathlib.Path('/usr/libexec/mock/mock'); \
+src = p.read_text(); \
+shim = '''\n\
+# --- KOJI COMPAT SHIM (added in Dockerfile) ---------------------------------\n\
+# mock 6.7+ больше не понимает '-r koji/<name>' (бьёт IsADirectoryError на '/').\n\
+# kojid по-прежнему так зовёт. Транслируем в '--configdir /etc/mock/koji -r <name>'.\n\
+import sys as _sys, os as _os\n\
+_a = _sys.argv\n\
+_i = 1\n\
+while _i < len(_a) - 1:\n\
+    if _a[_i] == '-r' and _a[_i+1].startswith('koji/'):\n\
+        _short = _a[_i+1].split('/', 1)[1]\n\
+        _a[_i:_i+2] = ['--configdir', '/etc/mock/koji', '-r', _short]\n\
+        break\n\
+    _i += 1\n\
+del _a, _i\n\
+# --- end KOJI COMPAT SHIM ---------------------------------------------------\n\
+'''; \
+marker = 'import sys'; \
+idx = src.index(marker); \
+p.write_text(src[:idx] + shim + src[idx:])"
+
 COPY kojid.conf /etc/kojid/kojid.conf
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

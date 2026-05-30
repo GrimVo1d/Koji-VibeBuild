@@ -26,6 +26,10 @@ htmlcov/
 .cache
 .hypothesis/
 
+# E2E test reports + spec — локальные dev-артефакты, не в репо
+docs/test-reports/
+docs/E2E_TESTING.md
+
 # Type checkers
 .mypy_cache/
 .dmypy.json
