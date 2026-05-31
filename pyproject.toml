@@ -7,7 +7,8 @@ name = "vibebuild"
 version = "0.1.0"
 description = "Koji extension for automatic dependency resolution and building"
 readme = "README.md"
-requires-python = ">=3.9"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
 authors = [
     {name = "VibeBuild Team"}
 ]
@@ -18,7 +19,6 @@ classifiers = [
     "Intended Audience :: System Administrators",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -54,7 +54,7 @@ vibebuild = ["data/*.json", "data/*.joblib"]
 
 [tool.black]
 line-length = 100
-target-version = ['py39', 'py310', 'py311', 'py312']
+target-version = ['py310', 'py311', 'py312']
 include = '\.pyi?$'
 exclude = '''
 /(
@@ -109,3 +109,17 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
 ]
+
+[tool.bandit]
+# B404 / B603: subprocess вызовы намеренные и используют список-форму,
+#   shell=True запрещён архитектурно (см. SECURITY.md, фикс 945b721).
+# B607: koji/rpm — фиксированные системные команды, путь к ним валидирован
+#   PATH, абсолютные пути сделали бы пакет непереносимым между дистрибутивами.
+# B101: assert используется только для нарушения внутренних инвариантов,
+#   не для валидации недоверенного ввода.
+# B110 / B112: try/except/pass — best-effort cleanup путей и кеша, исключения
+#   логируются вышестоящим вызовом.
+# B311: random.shuffle в scripts/train_model.py — для перемешивания train/test
+#   сплита, не для крипто-целей.
+skips = ["B101", "B110", "B112", "B311", "B404", "B603", "B607"]
+exclude_dirs = ["tests", "scripts", "dev"]
