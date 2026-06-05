@@ -70,7 +70,7 @@ vibebuild --no-name-resolution fedora-target my-package.src.rpm # сырые и�
 vibebuild --ml-model /path/to/model.joblib fedora-target my-package.src.rpm
 ```
 
-Пошаговая демонстрация (скачивание, анализ, dry-run, сборка) — см. [DEMO.md](DEMO.md).
+Пошаговая демонстрация (скачивание, анализ, dry-run, сборка) — см. раздел «Первая сборка: пошагово» в [QUICKSTART.md](docs/QUICKSTART.md#7-первая-сборка-пошагово).
 
 ### Проверка
 
@@ -213,7 +213,7 @@ python scripts/train_model.py --input data/training_data.json --output vibebuild
 
 ## Документация
 
-- [DEMO.md](DEMO.md) — пошаговая демонстрация (сборка одной командой, скачивание, анализ, dry-run)
+- [QUICKSTART.md](docs/QUICKSTART.md) — введение с нуля: понятия RPM/SRPM/Koji, модули, первая сборка пошагово
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — архитектура системы
 - [DEPLOYMENT.md](docs/DEPLOYMENT.md) — руководство по развёртыванию
 - [TESTING.md](docs/TESTING.md) — руководство по тестированию
