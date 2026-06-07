@@ -32,7 +32,7 @@ logger = logging.getLogger("prod_validation")
 PACKAGES = [
     # тривиальные
     "hello",
-    "tree",
+    "which",
     "jq",
     # python — широкий стек
     "python-six",
@@ -151,6 +151,15 @@ PACKAGES = [
     "ghostscript",
     "graphviz",
     "doxygen",
+    # Go SRPM
+    "golang-github-spf13-cobra",
+    "golang-github-sirupsen-logrus",
+    # Rust SRPM
+    "rust-serde",
+    "rust-tokio",
+    # чистый C++ / cmake-driven
+    "qt5-qtbase",
+    "boost",
 ]
 
 

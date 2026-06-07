@@ -355,6 +355,18 @@ def print_build_result(result: BuildResult) -> None:
     print(f"Packages built: {len(result.built_packages)}")
     print(f"Packages failed: {len(result.failed_packages)}")
 
+    if result.tagged_target:
+        print("\nТегированные пакеты:")
+        print(f"  ✓ {result.tagged_target}")
+
+    if result.tagged_deps:
+        print(f"\nТегированные зависимости ({len(result.tagged_deps)}):")
+        for nvr in result.tagged_deps:
+            print(f"  ✓ {nvr}")
+
+    if result.toolchains:
+        print(f"\nLanguages / Toolchains detected: {', '.join(result.toolchains)}")
+
     if result.built_packages:
         print("\nSuccessfully built:")
         for pkg in result.built_packages:
