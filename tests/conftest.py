@@ -2,8 +2,20 @@
 Pytest configuration and fixtures for VibeBuild tests.
 """
 
+import sys
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
+
+# Сделаем `import koji` рабочим даже без установленного пакета (macOS dev).
+# В контейнере koji ставится из rpm, на хосте — стаб с настоящим Exception-классом
+# (`koji.GenericError`), чтобы `except koji.GenericError` работал.
+if "koji" not in sys.modules:
+    try:
+        import koji  # noqa: F401
+    except ImportError:
+        _koji_stub = MagicMock()
+        _koji_stub.GenericError = type("GenericError", (Exception,), {})
+        sys.modules["koji"] = _koji_stub
 
 import pytest
 
@@ -99,6 +111,35 @@ def mock_subprocess_run(mocker):
     mock.return_value.stdout = ""
     mock.return_value.stderr = ""
     return mock
+
+
+@pytest.fixture(autouse=True)
+def mock_koji_session(mocker):
+    """Глобальный stub для `vibebuild.builder.koji.ClientSession`, чтобы любой
+    тест, который вызывает `build_with_deps` / `build_package`, не уходил в
+    реальный koji-hub и не висел в polling-циклах.
+
+    Дефолты подобраны так, чтобы пайплайн прокручивался без зависаний:
+      - newRepo возвращает task_id 999
+      - getTaskInfo возвращает state=2 (closed) — task мгновенно «завершён»
+      - build возвращает 12345
+      - packageListAdd / uploadWrapper / ssl_login / logout — no-op
+
+    Тест может переопределять любое из этих поведений через
+    `mock_koji_session.<method>.return_value = ...` или `.side_effect = ...`.
+    """
+    session = Mock()
+    session.build.return_value = 12345
+    session.newRepo.return_value = 999
+    session.getTaskInfo.return_value = {"state": 2}  # closed
+    session.listTasks.return_value = []
+    session.packageListAdd.return_value = None
+    session.uploadWrapper.return_value = None
+    session.logout.return_value = None
+    session.ssl_login.return_value = None
+    session.cancelTask.return_value = None
+    mocker.patch("vibebuild.builder.koji.ClientSession", return_value=session)
+    return session
 
 
 @pytest.fixture
