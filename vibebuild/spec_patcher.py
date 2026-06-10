@@ -3,12 +3,15 @@
 Применяется автоматически ко всем SRPM (целевому и зависимостям) до сабмита.
 Две трансформации, согласованные с преподавателем:
 
-1. В начало spec'а добавляется `%define _unpackaged_files_terminate_build 0`,
-   чтобы оставшиеся в BUILDROOT нераспакованные файлы не валили сборку.
-2. Целиком вырезается секция `%check` — testsuite'ы апстримов часто требуют
+1. Целиком вырезается секция `%check` — testsuite'ы апстримов часто требуют
    сети, специфичных лимитов pid/процессов и других вещей, которых в нашей
    sandbox-mock нет; вместо них опираемся на отдельный smoke install после
-   тегирования.
+   тегирования. Делается всегда.
+2. В начало spec'а опционально добавляется
+   `%define _unpackaged_files_terminate_build 0`, чтобы оставшиеся в BUILDROOT
+   нераспакованные файлы не валили сборку. Применяется условно — только при
+   ретрае после сборки, упавшей с «Installed (but unpackaged) file(s) found»
+   (см. логику ретрая в `vibebuild/builder.py`).
 
 Оба механизма — штатные RPM/Fedora: макрос документирован в upstream
 `/usr/lib/rpm/macros`, `%check` — обычная необязательная секция spec'а.
@@ -75,8 +78,13 @@ def _section_token(line: str) -> Optional[str]:
     return name if name in _SECTION_NAMES else None
 
 
-def patch_spec_text(spec: str) -> str:
-    """Применить обе правки к тексту spec'а. Идемпотентно."""
+def patch_spec_text(spec: str, add_unpackaged_macro: bool = False) -> str:
+    """Применить правки к тексту spec'а. Идемпотентно.
+
+    `%check` вырезается всегда. `UNPACKAGED_MACRO` добавляется только если
+    `add_unpackaged_macro=True` — используется при ретрае после ошибки
+    «Installed (but unpackaged) file(s) found».
+    """
     out: list[str] = []
     in_check = False
     has_macro = UNPACKAGED_MACRO in spec
@@ -90,7 +98,7 @@ def patch_spec_text(spec: str) -> str:
         if not in_check:
             out.append(line)
     body = "".join(out)
-    if not has_macro:
+    if add_unpackaged_macro and not has_macro:
         body = UNPACKAGED_MACRO + "\n" + body
     return body
 
@@ -124,19 +132,29 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
         )
 
 
-def patch_srpm(srpm_path: str, work_dir: Path, timeout: int = 600) -> str:
+def patch_srpm(
+    srpm_path: str,
+    work_dir: Path,
+    timeout: int = 600,
+    add_unpackaged_macro: bool = False,
+) -> str:
     """Распаковать SRPM, пропатчить spec, пересобрать новый SRPM рядом.
 
     Возвращает абсолютный путь к новому `.src.rpm`. NVR сохраняется, потому
     что Version/Release в spec'е не меняются. При любой ошибке поднимает
     `VibeBuildError` — вызывающий код может поймать и откатиться к исходному
     SRPM.
+
+    Когда `add_unpackaged_macro=True`, в начало spec'а вставляется
+    `%define _unpackaged_files_terminate_build 0`. По дефолту флаг выключен —
+    builder поднимает его только при ретрае после соответствующей ошибки.
     """
     srpm = Path(srpm_path).resolve()
     if not srpm.exists():
         raise VibeBuildError(f"SRPM not found: {srpm}")
 
-    target = Path(work_dir) / f"{srpm.stem}-patched"
+    suffix = "-patched-allow-unpackaged" if add_unpackaged_macro else "-patched"
+    target = Path(work_dir) / f"{srpm.stem}{suffix}"
     sources_dir = target / "SOURCES"
     specs_dir = target / "SPECS"
     target.mkdir(parents=True, exist_ok=True)
@@ -153,7 +171,9 @@ def patch_srpm(srpm_path: str, work_dir: Path, timeout: int = 600) -> str:
 
     spec_dst = specs_dir / spec_files[0].name
     spec_files[0].rename(spec_dst)
-    spec_dst.write_text(patch_spec_text(spec_dst.read_text()))
+    spec_dst.write_text(
+        patch_spec_text(spec_dst.read_text(), add_unpackaged_macro=add_unpackaged_macro)
+    )
 
     result = subprocess.run(
         [

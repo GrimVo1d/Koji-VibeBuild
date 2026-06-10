@@ -1,8 +1,10 @@
 """Тесты для vibebuild.spec_patcher.patch_spec_text.
 
-Проверяют две правки, согласованные с преподавателем:
-1. `%define _unpackaged_files_terminate_build 0` добавляется один раз.
-2. Секция `%check` вырезается целиком, до следующей RPM-секции.
+Проверяют правки, согласованные с преподавателем:
+1. Секция `%check` вырезается целиком, до следующей RPM-секции — всегда.
+2. `%define _unpackaged_files_terminate_build 0` добавляется только когда
+   `add_unpackaged_macro=True` (builder поднимает флаг при ретрае после ошибки
+   «Installed (but unpackaged) file(s) found»).
 """
 
 import pytest
@@ -54,25 +56,36 @@ def test_strip_check_preserves_following_sections():
     assert "initial" in patched
 
 
-def test_unpackaged_macro_added():
+def test_unpackaged_macro_not_added_by_default():
     patched = patch_spec_text(FULL_SPEC)
+    assert UNPACKAGED_MACRO not in patched
+
+
+def test_unpackaged_macro_added_with_flag():
+    patched = patch_spec_text(FULL_SPEC, add_unpackaged_macro=True)
     assert patched.startswith(UNPACKAGED_MACRO)
     assert patched.count(UNPACKAGED_MACRO) == 1
 
 
 def test_macro_not_duplicated_if_present():
     spec = f"{UNPACKAGED_MACRO}\nName: foo\n"
-    patched = patch_spec_text(spec)
+    patched = patch_spec_text(spec, add_unpackaged_macro=True)
     assert patched.count(UNPACKAGED_MACRO) == 1
 
 
-def test_idempotent():
+def test_idempotent_without_macro():
     once = patch_spec_text(FULL_SPEC)
     twice = patch_spec_text(once)
     assert once == twice
 
 
-def test_no_check_section_body_unchanged_except_macro():
+def test_idempotent_with_macro():
+    once = patch_spec_text(FULL_SPEC, add_unpackaged_macro=True)
+    twice = patch_spec_text(once, add_unpackaged_macro=True)
+    assert once == twice
+
+
+def test_no_check_section_body_unchanged_by_default():
     spec = (
         "Name: foo\n"
         "%prep\n"
@@ -84,7 +97,22 @@ def test_no_check_section_body_unchanged_except_macro():
         "%files\n"
         "%{_bindir}/foo\n"
     )
-    patched = patch_spec_text(spec)
+    assert patch_spec_text(spec) == spec
+
+
+def test_no_check_section_body_unchanged_except_macro_when_flag_set():
+    spec = (
+        "Name: foo\n"
+        "%prep\n"
+        "%setup -q\n"
+        "%build\n"
+        "make\n"
+        "%install\n"
+        "make install\n"
+        "%files\n"
+        "%{_bindir}/foo\n"
+    )
+    patched = patch_spec_text(spec, add_unpackaged_macro=True)
     body = patched.replace(UNPACKAGED_MACRO + "\n", "", 1)
     assert body == spec
 

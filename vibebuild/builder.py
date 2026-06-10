@@ -203,7 +203,7 @@ class KojiBuilder:
             self._open_session()
         return self._session  # type: ignore[return-value]
 
-    def _submit_build(self, srpm_path: str) -> BuildTask:
+    def _submit_build(self, srpm_path: str, add_unpackaged_macro: bool = False) -> BuildTask:
         """
         Submit a single package build to Koji (no waiting).
 
@@ -212,6 +212,8 @@ class KojiBuilder:
 
         Args:
             srpm_path: Path to SRPM file
+            add_unpackaged_macro: подсадить `_unpackaged_files_terminate_build 0`.
+                Только при ретрае — на первой попытке всегда False.
 
         Returns:
             BuildTask with task_id and status BUILDING
@@ -220,12 +222,17 @@ class KojiBuilder:
         if not srpm_path.exists():
             raise FileNotFoundError(f"SRPM not found: {srpm_path}")
 
-        # Дефолтно патчим spec во всех SRPM перед отправкой в koji:
-        # стрипаем %check и добавляем _unpackaged_files_terminate_build 0.
-        # См. vibebuild/spec_patcher.py — это согласованная с преподавателем
-        # замена прогона апстрим-testsuite в нашей sandbox-mock.
+        # Дефолтно патчим spec во всех SRPM перед отправкой в koji: только
+        # стрипаем %check (testsuite'ы апстрима требуют сети/pid-лимитов).
+        # Макрос `_unpackaged_files_terminate_build 0` сюда не подсаживается
+        # по умолчанию — только при ретрае (см. _build_and_retry_target /
+        # _retry_failed_with_macro).
         try:
-            patched = patch_srpm(str(srpm_path), Path(self.fetcher.download_dir))
+            patched = patch_srpm(
+                str(srpm_path),
+                Path(self.fetcher.download_dir),
+                add_unpackaged_macro=add_unpackaged_macro,
+            )
             srpm_path = Path(patched)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -312,6 +319,11 @@ class KojiBuilder:
         """
         Submit a single package build to Koji.
 
+        При FAILED-результате проверяет логи на «Installed (but unpackaged)
+        file(s) found» и в этом случае один раз ретраит сборку с
+        `_unpackaged_files_terminate_build 0`. Возвращается финальный task
+        (исходный или retry-task).
+
         Args:
             srpm_path: Path to SRPM file
             wait: Whether to wait for build to complete
@@ -325,15 +337,85 @@ class KojiBuilder:
         try:
             task = self._submit_build(srpm_path)
 
-            if wait and not self.nowait and task.task_id:
-                task.status = self._poll_build(task.task_id, task.nvr or task.package_name)
-            elif wait and not self.nowait:
-                task.status = BuildStatus.COMPLETE
+            if not (wait and not self.nowait and task.task_id):
+                if wait and not self.nowait:
+                    task.status = BuildStatus.COMPLETE
+                return task
 
+            task.status = self._poll_build(task.task_id, task.nvr or task.package_name)
+            if task.status == BuildStatus.FAILED and self._task_has_unpackaged_files_error(
+                task.task_id
+            ):
+                logger.info(
+                    "  retrying %s with _unpackaged_files_terminate_build 0",
+                    task.package_name,
+                )
+                retry_task = self._submit_build(srpm_path, add_unpackaged_macro=True)
+                if retry_task.task_id:
+                    retry_task.status = self._poll_build(
+                        retry_task.task_id, retry_task.nvr or retry_task.package_name
+                    )
+                return retry_task
             return task
         finally:
             if own_session:
                 self._close_session()
+
+    # Маркер ошибки rpmbuild про «Installed (but unpackaged) file(s) found».
+    # Появляется в build.log buildArch-сабтаска. Идентичен между rpm-версиями.
+    _UNPACKAGED_FILES_MARKER = "Installed (but unpackaged) file(s) found"
+
+    # Сколько байт читать из конца build.log при поиске маркера. Реальные
+    # ошибки rpmbuild печатаются в конце лога; читаем хвост, чтобы не тянуть
+    # многомегабайтный лог целиком.
+    _UNPACKAGED_FILES_LOG_TAIL_BYTES = 200_000
+
+    def _task_has_unpackaged_files_error(self, task_id: int) -> bool:
+        """Проверить логи task'а (включая subtasks) на маркер unpackaged-files.
+
+        Через `listTaskOutput(stat=True)` узнаёт размер `build.log`, читает
+        хвост (последние `_UNPACKAGED_FILES_LOG_TAIL_BYTES` байт) и ищет
+        маркер. Negative offset не поддерживается koji-hub (вернёт
+        `OSError: Invalid argument`), поэтому считаем offset вручную.
+        При любой ошибке доступа к логам возвращает False — builder не
+        делает ретрай, считая отказ обычным фейлом сборки.
+        """
+        session = self._get_session()
+        candidate_ids: list[int] = [task_id]
+        try:
+            subs = session.listTasks(opts={"parent": task_id}) or []
+            candidate_ids.extend(int(s["id"]) for s in subs if s.get("id") is not None)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("listTasks(parent=%s) failed: %s", task_id, exc)
+
+        for tid in candidate_ids:
+            try:
+                stats = session.listTaskOutput(tid, stat=True) or {}
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("listTaskOutput(%s, stat=True) failed: %s", tid, exc)
+                continue
+            if not isinstance(stats, dict) or "build.log" not in stats:
+                continue
+            try:
+                size = int(stats["build.log"].get("st_size", 0))
+            except (TypeError, ValueError):
+                size = 0
+            offset = max(0, size - self._UNPACKAGED_FILES_LOG_TAIL_BYTES)
+            try:
+                chunk = session.downloadTaskOutput(tid, "build.log", offset=offset, size=-1)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("downloadTaskOutput(%s, build.log) failed: %s", tid, exc)
+                continue
+            text = (
+                chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+            )
+            if self._UNPACKAGED_FILES_MARKER in text:
+                logger.info(
+                    "  detected unpackaged-files error in task %s build.log — will retry",
+                    tid,
+                )
+                return True
+        return False
 
     # koji task-state числовые коды → имена.
     _KOJI_TASK_STATES = {
@@ -593,6 +675,7 @@ class KojiBuilder:
                 # Poll all submitted tasks simultaneously
                 if level_tasks:
                     self._poll_builds(level_tasks)
+                    self._retry_unpackaged_failures(level_tasks)
 
                     level_built = 0
                     for task in level_tasks:
@@ -641,6 +724,37 @@ class KojiBuilder:
         logger.info(f"Built: {len(result.built_packages)}, Failed: {len(result.failed_packages)}")
 
         return result
+
+    def _retry_unpackaged_failures(self, level_tasks: list[BuildTask]) -> None:
+        """Для каждой FAILED-задачи в уровне: если в логе маркер unpackaged-files,
+        ретраим сборку один раз с `_unpackaged_files_terminate_build 0`.
+
+        Мутирует task in-place — заменяет task_id/status/nvr на retry-результат,
+        чтобы `tasks/_populate_tagged_builds` видели актуальную сборку.
+        """
+        retried: list[BuildTask] = []
+        for task in level_tasks:
+            if task.status != BuildStatus.FAILED or not task.task_id:
+                continue
+            if not self._task_has_unpackaged_files_error(task.task_id):
+                continue
+            logger.info(
+                "  retrying %s with _unpackaged_files_terminate_build 0",
+                task.package_name,
+            )
+            try:
+                new_task = self._submit_build(task.srpm_path, add_unpackaged_macro=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("  retry submit failed for %s: %s", task.package_name, exc)
+                continue
+            task.task_id = new_task.task_id
+            task.srpm_path = new_task.srpm_path
+            task.nvr = new_task.nvr
+            task.status = BuildStatus.BUILDING
+            task.error_message = None
+            retried.append(task)
+        if retried:
+            self._poll_builds(retried)
 
     def _collect_toolchains(self, root_build_requires) -> list[str]:
         """Aggregate BR from root + every built dep, classify via detect_toolchains."""
