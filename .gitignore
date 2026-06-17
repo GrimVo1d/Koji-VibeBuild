@@ -56,7 +56,8 @@ Thumbs.db
 vibebuild/data/*.joblib
 
 # Claude Code (local-only)
-.claude/settings.local.json
+.claude/
+!CLAUDE.md
 
 # Ansible
 *.retry
